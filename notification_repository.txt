@@ -1,0 +1,218 @@
+// lib/repositories/notification_repository.dart
+import 'dart:async';
+import 'lib/models/notification_event_model.dart';
+import 'lib/services/notification_storage.dart';
+import 'lib/utils/logger.dart';
+
+class NotificationRepository {
+  // Singleton instance
+  static final NotificationRepository _instance =
+      NotificationRepository._internal();
+
+  // Stream controller to broadcast notification updates
+  final _notificationsStreamController =
+      StreamController<List<NotificationEventModel>>.broadcast();
+
+  // Cached notifications
+  List<NotificationEventModel> _cachedNotifications = [];
+
+  // Factory constructor
+  factory NotificationRepository() {
+    return _instance;
+  }
+
+  // Private constructor
+  NotificationRepository._internal() {
+    _loadNotifications();
+  }
+
+  // Getter for the stream
+  Stream<List<NotificationEventModel>> get notificationsStream =>
+      _notificationsStreamController.stream;
+
+  // Getter for cached notifications
+  List<NotificationEventModel> get notifications => _cachedNotifications;
+
+  // Load all notifications from storage
+  Future<void> _loadNotifications() async {
+    try {
+      _cachedNotifications = await NotificationStorage.getNotifications();
+
+      // Log all stored notifications when they're loaded
+      AppLogger.log("""
+STORED NOTIFICATIONS (${_cachedNotifications.length} total):
+${_cachedNotifications.map((notification) => """
+packageName: ${notification.packageName}
+title: ${notification.title}
+content: ${notification.content}
+timestamp: ${notification.timestamp.toIso8601String()}
+hasRemoved: ${notification.hasRemoved}
+canReply: ${notification.canReply}
+""").join('------------------------------\n')}
+==============================
+    """);
+
+      // Always emit an event when notifications are loaded
+      _notificationsStreamController.add(_cachedNotifications);
+    } catch (e) {
+      AppLogger.error('Error loading notifications in repository: $e');
+    }
+  }
+
+  // Save a notification if it's from a bank app
+  Future<bool> saveNotification(NotificationEventModel notification) async {
+    try {
+      // Check if notification is from a bank app
+      if (isBankNotification(notification)) {
+        await NotificationStorage.saveNotification(notification);
+
+        // Get updated notifications from storage
+        final updatedNotifications =
+            await NotificationStorage.getNotifications();
+
+        // Update the cache
+        _cachedNotifications = updatedNotifications;
+
+        // Broadcast the update to all listeners
+        _notificationsStreamController.add(_cachedNotifications);
+
+        return true;
+      }
+      return false;
+    } catch (e) {
+      AppLogger.error('Error saving notification in repository: $e');
+      return false;
+    }
+  }
+
+  // Get all bank notifications
+  Future<List<NotificationEventModel>> getBankNotifications() async {
+    try {
+      final allNotifications = await NotificationStorage.getNotifications();
+      return allNotifications.where(isBankNotification).toList();
+    } catch (e) {
+      AppLogger.error('Error getting bank notifications: $e');
+      return [];
+    }
+  }
+
+  List<dynamic> _hasAmount(String? content) {
+    if (content == null || content.isEmpty) {
+      return [false, null];
+    }
+
+    String? foundAmount;
+
+    // Pattern 1: Currency symbols like ₦1,000.00 or $50.45
+    final symbolRegex = RegExp(r'[₦$](\d+(?:,\d+)*(?:\.\d+)?)');
+    final symbolMatch = symbolRegex.firstMatch(content);
+
+    // Pattern 2: NGN format like NGN300.00 or NGN 300.00
+    final ngnRegex =
+        RegExp(r'NGN\s*(\d+(?:,\d+)*(?:\.\d+)?)', caseSensitive: false);
+    final ngnMatch = ngnRegex.firstMatch(content);
+
+    // Check for symbol match
+    if (symbolMatch != null) {
+      foundAmount = symbolMatch.group(1);
+      return [true, foundAmount];
+    }
+
+    // Check for NGN match
+    if (ngnMatch != null) {
+      // Get the full match and format it properly
+      final fullMatch = ngnMatch.group(1);
+      if (fullMatch != null) {
+        foundAmount = fullMatch;
+        return [true, foundAmount];
+      }
+    }
+
+    // No amount found
+    return [false, null];
+  }
+
+// Check if a notification is from a bank app
+  bool isBankNotification(NotificationEventModel notification) {
+    final String? packageName = notification.packageName?.toLowerCase();
+    final String? title = notification.title?.toLowerCase();
+    final String? content = notification.content?.toLowerCase();
+
+    // List of bank app package names to filter
+    final List<String> bankPackageNames = [
+      'com.kudabank.app',
+      'team.opay.pay',
+      'com.moniepoint.personal'
+    ];
+
+    bool isOutgoingTransaction = false;
+
+    // Pattern 1: "You just sent ₦X to Y" (Kuda pattern)
+    if (content!.contains('you just sent') && content.contains('to ')) {
+      isOutgoingTransaction = true;
+    }
+
+    // Pattern 2: "Your account X was debited NGN/₦Y for TRANSFER TO Z" (Moniepoint pattern)
+    else if ((content.contains('was debited') ||
+            content.contains('debited with')) &&
+        (content.contains('transfer to') || content.contains('for transfer'))) {
+      isOutgoingTransaction = true;
+    }
+
+    // Pattern 3: Any content containing both "debit" and "transfer" variations
+    else if ((content.contains('debit') || content.contains('debited')) &&
+        content.contains('transfer')) {
+      isOutgoingTransaction = true;
+    }
+
+    final bool isFromBankPackage = notification.packageName != null &&
+        bankPackageNames.contains(notification.packageName);
+
+    // Get the amount check result
+    final amountCheck = _hasAmount(content);
+    final hasAmount = amountCheck[0];
+
+    return isFromBankPackage && isOutgoingTransaction && hasAmount;
+  }
+
+// Extract transaction amount from notification content
+  String? extractAmount(String? content) {
+    final amountCheck = _hasAmount(content);
+    if (amountCheck[0] == true && amountCheck.length > 1) {
+      return amountCheck[1] as String?;
+    }
+    return null;
+  }
+
+  // Get bank name from package name
+  String getBankName(String? packageName) {
+    if (packageName == null) return 'Unknown Bank';
+
+    switch (packageName) {
+      case 'com.kudabank.app':
+        return 'Kuda Bank';
+      case 'team.opay.pay':
+        return 'OPay';
+      case 'com.moniepoint.personal':
+        return 'Moniepoint';
+      default:
+        return 'Unknown Bank';
+    }
+  }
+
+  // Clear all notifications
+  Future<void> clearAllNotifications() async {
+    try {
+      await NotificationStorage.clearNotifications();
+      _cachedNotifications = [];
+      _notificationsStreamController.add(_cachedNotifications);
+    } catch (e) {
+      AppLogger.error('Error clearing notifications: $e');
+    }
+  }
+
+  // Dispose resources
+  void dispose() {
+    _notificationsStreamController.close();
+  }
+}

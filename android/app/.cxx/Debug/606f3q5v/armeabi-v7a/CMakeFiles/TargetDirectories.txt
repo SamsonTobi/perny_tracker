@@ -1,0 +1,2 @@
+C:/Users/user/StudioProjects/test_expense_tracker/android/app/.cxx/Debug/606f3q5v/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Users/user/StudioProjects/test_expense_tracker/android/app/.cxx/Debug/606f3q5v/armeabi-v7a/CMakeFiles/rebuild_cache.dir
